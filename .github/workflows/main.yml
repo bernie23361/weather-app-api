@@ -1,40 +1,39 @@
-name: Update All Taiwan Weather
+name: Update Weather Data
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # 每 30 分鐘跑一次 (不影響流量的最佳頻率)
-  workflow_dispatch:
+    - cron: '*/30 * * * *'  # 每 30 分鐘自動執行
+  workflow_dispatch:        # 允許手動按按鈕執行
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write       # 給予寫入權限，確保能儲存檔案
+
     steps:
-      - name: Checkout
+      - name: Checkout code (檢出程式碼)
         uses: actions/checkout@v3
 
-      - name: Set up Python
+      - name: Set up Python (設定 Python 環境)
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      - name: Install dependencies
+      - name: Install dependencies (安裝套件)
         run: pip install requests
 
-      - name: Run script
+      - name: Run scraper (執行爬蟲程式)
         env:
           CWA_API_KEY: ${{ secrets.CWA_API_KEY }}
           MOENV_API_KEY: ${{ secrets.MOENV_API_KEY }}
-        run: python fetch_all.py
+        # 注意：如果你把 Python 檔名改成 fetch_all.py 了，下面這行要改成 python fetch_all.py
+        run: python fetch_weather.py
 
-      - name: Deploy Data
+      - name: Commit and push changes (提交並存檔)
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # 強制加入 data 資料夾內的所有檔案
-- name: Deploy Data
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add data/          # <--- 這裡原本是 weather_api.json，請改成 data/
-          git commit -m "Update All Taiwan Data" || exit 0
+          git add .
+          git commit -m "Auto update all weather data" || exit 0
           git push
