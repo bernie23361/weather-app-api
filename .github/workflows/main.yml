@@ -28,7 +28,7 @@ jobs:
           CWA_API_KEY: ${{ secrets.CWA_API_KEY }}
           MOENV_API_KEY: ${{ secrets.MOENV_API_KEY }}
         # 注意：如果你把 Python 檔名改成 fetch_all.py 了，下面這行要改成 python fetch_all.py
-        run: python fetch_weather.py
+        run: python fetch_all.py
 
       - name: Commit and push changes (提交並存檔)
         run: |
