@@ -31,6 +31,10 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           # 強制加入 data 資料夾內的所有檔案
-          git add data/
-          git commit -m "Update weather data" || exit 0
+- name: Deploy Data
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add data/          # <--- 這裡原本是 weather_api.json，請改成 data/
+          git commit -m "Update All Taiwan Data" || exit 0
           git push
