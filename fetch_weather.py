@@ -9,12 +9,11 @@ def fetch_data():
         print("❌ 錯誤: 找不到 CWA_API_KEY")
         return
 
-    # 建立 data 資料夾
     if not os.path.exists("data"):
         os.makedirs("data")
 
-    # 氣象署「未來 2 天預報」的各縣市 API 代號列表 (絕對穩定版)
-    # 格式: 縣市名稱 -> API ID
+    # 氣象署縣市預報 API (F-D0047-0XX)
+    # 宜蘭, 桃園, 新竹縣...
     county_api_list = {
         "宜蘭縣": "F-D0047-001", "桃園市": "F-D0047-005", "新竹縣": "F-D0047-009",
         "苗栗縣": "F-D0047-013", "彰化縣": "F-D0047-017", "南投縣": "F-D0047-021",
@@ -26,14 +25,13 @@ def fetch_data():
         "金門縣": "F-D0047-085"
     }
 
-    print("🚀 開始分縣市抓取氣象署資料...")
-
+    print("🚀 開始分縣市抓取氣象署資料 (相容模式)...")
     success_count = 0
 
     for city_name, api_id in county_api_list.items():
         try:
-            # 1. 抓取該縣市資料
-            url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{api_id}?Authorization={cwa_key}"
+            # 加上 format=JSON 確保格式正確
+            url = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/{api_id}?Authorization={cwa_key}&format=JSON"
             res = requests.get(url)
             
             if res.status_code != 200:
@@ -41,26 +39,37 @@ def fetch_data():
                 continue
 
             data = res.json()
-            locations = data['records']['locations'][0]['location']
+
+            # --- 🔍 智慧偵測資料結構 ---
+            records = data.get('records', {})
+            locations_raw = []
+
+            if 'locations' in records:
+                # 結構 A: records -> locations -> [0] -> location
+                locations_raw = records['locations'][0]['location']
+            elif 'location' in records:
+                # 結構 B: records -> location
+                locations_raw = records['location']
+            else:
+                # 如果都找不到，印出目前有的欄位幫忙除錯
+                print(f"❌ {city_name} 結構異常，現有欄位: {list(records.keys())}")
+                # 嘗試印出整包資料的前 100 個字來看看到底是什麼
+                print(f"   內容摘要: {str(data)[:100]}")
+                continue
             
-            # 2. 拆解成該縣市底下的所有鄉鎮
-            for loc in locations:
-                town_name = loc['locationName'] # 例如：西屯區、信義區
+            # --- 開始拆解鄉鎮 ---
+            for loc in locations_raw:
+                town_name = loc['locationName']
                 
-                # 簡單整理一下資料，縮小體積
-                weather_elements = loc['weatherElement']
-                
-                # 製作簡化版 JSON
+                # 簡單整理，保留未來預報數據
                 processed_data = {
                     "city": city_name,
                     "district": town_name,
-                    "data": weather_elements, # 這裡保留了完整未來2天預報
+                    "data": loc['weatherElement'],
                     "update_time": time.strftime("%Y-%m-%d %H:%M:%S")
                 }
 
-                # 存檔 -> data/西屯區.json
-                # 注意：如果不同縣市有同名鄉鎮(如仁愛區)，可能會覆蓋，建議加上縣市前綴
-                # 但為了你方便，我們先直接存鄉鎮名
+                # 存檔
                 file_path = f"data/{town_name}.json"
                 with open(file_path, "w", encoding="utf-8") as f:
                     json.dump(processed_data, f, ensure_ascii=False)
@@ -69,9 +78,9 @@ def fetch_data():
             success_count += 1
             
         except Exception as e:
-            print(f"❌ {city_name} 發生錯誤: {e}")
+            print(f"❌ {city_name} 發生未預期錯誤: {e}")
 
-    print(f"\n🎉 全部完成！共處理 {success_count} 個縣市的資料。")
+    print(f"\n🎉 執行結束！成功處理 {success_count} 個縣市。")
 
 if __name__ == "__main__":
     fetch_data()
