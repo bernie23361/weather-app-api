@@ -1,37 +1,36 @@
-name: Update Taiwan Weather API
+name: Update All Taiwan Weather
 
 on:
   schedule:
-    - cron: '*/30 * * * *'  # 每 30 分鐘執行一次
-  workflow_dispatch:        # 允許手動執行
+    - cron: '*/30 * * * *' # 每 30 分鐘跑一次 (不影響流量的最佳頻率)
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write       # 必須開啟寫入權限
     steps:
-      - name: 檢出程式碼
+      - name: Checkout
         uses: actions/checkout@v3
 
-      - name: 設定 Python
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      - name: 安裝必要套件
+      - name: Install dependencies
         run: pip install requests
 
-      - name: 執行資料抓取與拆分
+      - name: Run script
         env:
           CWA_API_KEY: ${{ secrets.CWA_API_KEY }}
           MOENV_API_KEY: ${{ secrets.MOENV_API_KEY }}
-        run: python fetch_weather.py
+        run: python fetch_all.py
 
-      - name: 將新資料推送到 GitHub
+      - name: Deploy Data
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add data/*.json
-          git commit -m "自動更新全台天氣與 AQI 數據" || exit 0
+          # 強制加入 data 資料夾內的所有檔案
+          git add data/
+          git commit -m "Update weather data" || exit 0
           git push
