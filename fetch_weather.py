@@ -41,23 +41,15 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c 
 
-# --- 🎤 升級版：純粹・台式氣象語錄生成器 (僅保留行動建議) ---
 def get_taiwanese_quote(apparent_temp, weather, is_raining, wind_speed):
-    # 這裡不再包含「體感幾度」這種重複數據，只說人話
-    advice = "天氣剛剛好，出門走走吧！" # 預設語錄
-    
-    # 狀況 1：下雨天 (最優先警示)
+    advice = "天氣剛剛好，出門走走吧！" 
     if is_raining:
         if "大雨" in weather or "豪雨" in weather:
             advice = "外面落大雨，雨具要傳賀 (準備好)，騎車卡注意安全喔！"
         else:
             advice = "外面在飄雨，出門記得帶把傘，走路小心滑倒。"
-    
-    # 狀況 2：風很大
     elif wind_speed > 8:
         advice = "風透透 (風很大)，騎車容易飄，記得戴個帽子防風喔。"
-
-    # 狀況 3：依據體感溫度給穿搭建議
     elif apparent_temp < 15:
         advice = "天氣冷吱吱，寒流發威，出門愛穿乎燒喔！"
     elif 15 <= apparent_temp < 21:
@@ -66,10 +58,8 @@ def get_taiwanese_quote(apparent_temp, weather, is_raining, wind_speed):
         advice = "天氣很速西 (舒適)，微風徐徐，超適合出門散散步！"
     elif 27 <= apparent_temp < 32:
         advice = "天氣有點悶熱，透氣短袖穿起來，記得多喝水。"
-    else: # > 32度
+    else: 
         advice = "日頭赤炎炎，超級熱！防曬做好小心中暑，盡量待在冷氣房！"
-
-    # 👇 關鍵修正：現在只回傳純語錄，沒有數字干擾
     return advice
 
 def calculate_lifestyle_indices(weather_elements, current_vals):
@@ -91,7 +81,6 @@ def calculate_lifestyle_indices(weather_elements, current_vals):
                     except: pop_12h = 0
 
     curr_at = curr_t + 0.33 * curr_rh / 100 * 6.105 * 2.718 ** (17.27 * curr_t / (237.7 + curr_t)) - 4
-    # 四捨五入體感溫度
     curr_at = round(curr_at)
 
     if curr_t < 15: clothing = "厚外套"
@@ -134,7 +123,6 @@ def fetch_data():
 
     print(f"🚀 啟動氣象站: 台灣時間 {tw_now_str}")
 
-    # 1. AQI
     aqi_map = {}
     try:
         if moenv_key:
@@ -148,7 +136,6 @@ def fetch_data():
     except:
         print("⚠️ AQI 失敗 (使用預設值)")
 
-    # 2. 真實觀測站
     valid_stations = []
     try:
         url_obs = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0003-001?Authorization={cwa_key}&format=JSON"
@@ -189,7 +176,6 @@ def fetch_data():
     except Exception as e:
         print(f"❌ 觀測失敗: {e}")
 
-    # 3. 處理 368 鄉鎮
     county_api_week = {
         "宜蘭縣": "F-D0047-003", "桃園市": "F-D0047-007", "新竹縣": "F-D0047-009",
         "苗栗縣": "F-D0047-013", "彰化縣": "F-D0047-017", "南投縣": "F-D0047-021",
@@ -222,6 +208,7 @@ def fetch_data():
                 town_key = f"{city_name}{town_name}"
                 geo_info = TOWN_GEO.get(town_key)
                 
+                # 🛑 針對偏遠鄉鎮擴大搜查半徑 (15km -> 35km)
                 if geo_info:
                     town_lat, town_lon = geo_info
                     matched_station = None
@@ -235,7 +222,7 @@ def fetch_data():
                     final_obs_data = None
                     source_station_name = ""
 
-                    if matched_station and min_dist < 15:
+                    if matched_station and min_dist < 35:
                         final_obs_data = matched_station['data']
                         source_station_name = matched_station['name']
                 else:
@@ -243,6 +230,7 @@ def fetch_data():
                     source_station_name = "預報推算(無座標)"
 
                 forecast_wx = "多雲"
+                forecast_temp_now = "25" # 預設值，後面會被真預報覆蓋
                 daily_agg = {}
 
                 for el in weather_elements:
@@ -252,6 +240,11 @@ def fetch_data():
                     if e_name == 'Wx' and time_list:
                          vals = time_list[0].get('elementValue', time_list[0].get('ElementValue', []))
                          if vals: forecast_wx = vals[0].get('value', '多雲')
+                    
+                    # 抓取第一筆預報溫度作為安全底線
+                    if e_name == 'T' and time_list:
+                        vals = time_list[0].get('elementValue', time_list[0].get('ElementValue', []))
+                        if vals: forecast_temp_now = vals[0].get('value', '25')
 
                     for t in time_list:
                         start_time = t.get('startTime', t.get('StartTime', ''))
@@ -297,10 +290,8 @@ def fetch_data():
                     final_ws = final_obs_data['wind_speed']
                     final_wx = "雨天" if final_rain > 0 else forecast_wx 
                 else:
-                    if daily_forecast:
-                        final_temp = (daily_forecast[0]['high'] + daily_forecast[0]['low']) / 2
-                    else:
-                        final_temp = 25
+                    # 如果沒觀測，使用該鄉鎮下一小時的「預報溫度」
+                    final_temp = int(forecast_temp_now)
                     final_rain = 0
                     final_ws = 2
                     final_wx = forecast_wx
@@ -310,7 +301,6 @@ def fetch_data():
                 indices = calculate_lifestyle_indices(weather_elements, final_obs_data)
                 my_aqi = aqi_map.get(city_name, 35)
 
-                # --- 🤖 修改後的純語錄產生器 ---
                 pure_advice = get_taiwanese_quote(
                     apparent_temp=indices['apparent_temp'], 
                     weather=final_wx, 
@@ -326,7 +316,7 @@ def fetch_data():
                     "weather": final_wx,
                     "aqi": my_aqi,
                     "station_source": source_station_name, 
-                    "description": pure_advice, # 現在這裡只有純粹的台式關心！
+                    "description": pure_advice,
                     "suggestions": indices,
                     "daily_forecast": daily_forecast[:7],
                     "update_time": tw_now_str 
