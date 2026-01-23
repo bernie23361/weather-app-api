@@ -3,6 +3,7 @@ import json
 import os
 import time
 import math
+import random
 from datetime import datetime, timedelta
 
 # --- 📍 全台 368 鄉鎮市區經緯度資料庫 ---
@@ -31,18 +32,49 @@ TOWN_GEO = {
     "連江縣南竿鄉": [26.1578, 119.9329], "連江縣北竿鄉": [26.2239, 119.9965], "連江縣莒光鄉": [25.9736, 119.9404], "連江縣東引鄉": [26.3683, 120.4939]
 }
 
-# --- 📐 數學小教室：計算地球兩點距離 (Haversine 公式) ---
 def calculate_distance(lat1, lon1, lat2, lon2):
-    R = 6371  # 地球半徑 (公里)
+    R = 6371  
     dLat = math.radians(lat2 - lat1)
     dLon = math.radians(lon2 - lon1)
     a = math.sin(dLat/2) * math.sin(dLat/2) + \
         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * \
         math.sin(dLon/2) * math.sin(dLon/2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    return R * c # 回傳距離 (km)
+    return R * c 
 
-# --- 🧠 生活指數計算 ---
+# --- 🎤 新功能：台式氣象語錄生成器 (Professional + Caring + Taiwanese) ---
+def get_taiwanese_quote(temp, apparent_temp, weather, is_raining, wind_speed):
+    # 第一段：精準數據
+    base_info = f"體感 {apparent_temp}°，{weather}。"
+    
+    # 第二段：情境判斷與台式提醒
+    advice = ""
+    
+    # 狀況 1：下雨天 (最優先)
+    if is_raining:
+        if "大雨" in weather or "豪雨" in weather:
+            advice = "外面落大雨，雨具要傳賀 (準備好)，騎車卡注意安全喔！"
+        else:
+            advice = "外面在飄雨，出門記得帶把傘，走路小心滑倒。"
+    
+    # 狀況 2：風很大
+    elif wind_speed > 8:
+        advice = "風透透 (風很大)，騎車容易飄，記得戴個帽子防風喔。"
+
+    # 狀況 3：依據體感溫度給穿搭建議
+    elif apparent_temp < 15:
+        advice = "天氣冷吱吱，寒流發威，出門愛穿乎燒喔！"
+    elif 15 <= apparent_temp < 21:
+        advice = "風吹來涼涼的，日夜溫差大，出門記得帶件薄外套。"
+    elif 21 <= apparent_temp < 27:
+        advice = "天氣很速西 (舒適)，微風徐徐，超適合出門散散步！"
+    elif 27 <= apparent_temp < 32:
+        advice = "天氣有點悶熱，透氣短袖穿起來，記得多喝水。"
+    else: # > 32度
+        advice = "日頭赤炎炎，超級熱！防曬做好小心中暑，盡量待在冷氣房！"
+
+    return f"{base_info}{advice}"
+
 def calculate_lifestyle_indices(weather_elements, current_vals):
     curr_t = current_vals.get('temp', 25)
     curr_rh = current_vals.get('humidity', 75)
@@ -62,6 +94,8 @@ def calculate_lifestyle_indices(weather_elements, current_vals):
                     except: pop_12h = 0
 
     curr_at = curr_t + 0.33 * curr_rh / 100 * 6.105 * 2.718 ** (17.27 * curr_t / (237.7 + curr_t)) - 4
+    # 四捨五入體感溫度
+    curr_at = round(curr_at)
 
     if curr_t < 15: clothing = "厚外套"
     elif 15 <= curr_t < 20: clothing = "夾克/風衣"
@@ -87,7 +121,8 @@ def calculate_lifestyle_indices(weather_elements, current_vals):
     return {
         "clothing": clothing, "cycling": cycling, "sunscreen": sunscreen,
         "laundry": laundry, "car_wash": car_wash, "skincare": skincare,
-        "cold_risk": cold_risk, "dog_walk": dog_walk, "sport": sport
+        "cold_risk": cold_risk, "dog_walk": dog_walk, "sport": sport,
+        "apparent_temp": curr_at # 回傳計算好的體感溫度
     }
 
 def fetch_data():
@@ -97,8 +132,6 @@ def fetch_data():
     if not os.path.exists("data"):
         os.makedirs("data")
 
-    # 🇹🇼 設定「台灣標準時間」(UTC+8) 作為系統基準時間
-    # GitHub Action 伺服器在 UTC (美國)，所以要手動加 8 小時
     tw_now = datetime.utcnow() + timedelta(hours=8)
     tw_now_str = tw_now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -118,7 +151,7 @@ def fetch_data():
     except:
         print("⚠️ AQI 失敗 (使用預設值)")
 
-    # 2. 真實觀測站 (加入「時間賞味期限」過濾，剔除殭屍測站)
+    # 2. 真實觀測站
     valid_stations = []
     try:
         url_obs = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0003-001?Authorization={cwa_key}&format=JSON"
@@ -127,16 +160,11 @@ def fetch_data():
         
         count = 0
         for st in stations:
-            # ⏳ 取得氣象署該筆資料的時間
-            obs_time_str = st['ObsTime']['DateTime'] # 例: 2026-01-23T12:00:00+08:00
-            
-            # 將氣象署的時間字串轉換為 Python datetime (忽略時區字串，只取前 19 碼)
+            obs_time_str = st['ObsTime']['DateTime']
             obs_time = datetime.strptime(obs_time_str[:19], "%Y-%m-%dT%H:%M:%S")
             
-            # 🛑 核心防線：資料賞味期限為「1.5 小時 (5400秒)」
-            # 拿【台灣現在時間 (tw_now)】去減【測站回傳時間 (obs_time)】
             if (tw_now - obs_time).total_seconds() > 5400:
-                continue # 這筆資料太舊了，直接跳過這個測站！
+                continue 
 
             geo = st['GeoInfo']
             lat = float(geo['Coordinates'][0]['StationLatitude'])
@@ -160,7 +188,7 @@ def fetch_data():
                     })
                     count += 1
             except: continue
-        print(f"✅ 有效且新鮮測站: {count} 個 (已剔除過期殭屍測站)")
+        print(f"✅ 有效且新鮮測站: {count} 個")
     except Exception as e:
         print(f"❌ 觀測失敗: {e}")
 
@@ -199,7 +227,6 @@ def fetch_data():
                 
                 if geo_info:
                     town_lat, town_lon = geo_info
-                    
                     matched_station = None
                     min_dist = 99999.0
                     for st in valid_stations:
@@ -218,7 +245,6 @@ def fetch_data():
                     final_obs_data = None
                     source_station_name = "預報推算(無座標)"
 
-                # --- 預報解析 ---
                 forecast_wx = "多雲"
                 daily_agg = {}
 
@@ -238,7 +264,6 @@ def fetch_data():
 
                         if len(start_time) >= 10:
                             date_str = start_time[:10] 
-                            
                             if date_str not in daily_agg:
                                 daily_agg[date_str] = { "temps": [], "pops": [], "wx": [] }
                             
@@ -269,10 +294,10 @@ def fetch_data():
                             "prob": f"{pop_prob}%"
                         })
                 
-                # 最終數據整合
                 if final_obs_data:
                     final_temp = final_obs_data['temp']
                     final_rain = final_obs_data['rain']
+                    final_ws = final_obs_data['wind_speed']
                     final_wx = "雨天" if final_rain > 0 else forecast_wx 
                 else:
                     if daily_forecast:
@@ -280,6 +305,7 @@ def fetch_data():
                     else:
                         final_temp = 25
                     final_rain = 0
+                    final_ws = 2
                     final_wx = forecast_wx
                     final_obs_data = {"temp": final_temp, "humidity": 75, "wind_speed": 2, "rain": 0}
                     source_station_name = "預報推算"
@@ -287,17 +313,27 @@ def fetch_data():
                 indices = calculate_lifestyle_indices(weather_elements, final_obs_data)
                 my_aqi = aqi_map.get(city_name, 35)
 
+                # --- 🤖 產生動態語錄小提醒 ---
+                smart_description = get_taiwanese_quote(
+                    temp=final_temp, 
+                    apparent_temp=indices['apparent_temp'], 
+                    weather=final_wx, 
+                    is_raining=(final_rain > 0 or "雨" in final_wx),
+                    wind_speed=final_ws
+                )
+
                 processed_data = {
                     "city": city_name,
                     "district": town_name,
                     "temp": str(int(final_temp)),
-                    "apparent_temp": str(int(final_temp - 2)),
+                    "apparent_temp": str(indices['apparent_temp']),
                     "weather": final_wx,
                     "aqi": my_aqi,
                     "station_source": source_station_name, 
+                    "description": smart_description, # 傳送給 APP 顯示
                     "suggestions": indices,
                     "daily_forecast": daily_forecast[:7],
-                    "update_time": tw_now_str # 這裡現在會顯示正確的台灣時間了！
+                    "update_time": tw_now_str 
                 }
 
                 file_path = f"data/{city_name}{town_name}.json"
@@ -309,7 +345,7 @@ def fetch_data():
         except Exception as e:
             print(f"❌ {city_name} 錯誤: {e}")
 
-    print("🎉 資料庫更新完畢！(殭屍測站已清除，時間已校正)")
+    print("🎉 資料庫更新完畢！")
 
 if __name__ == "__main__":
     fetch_data()
