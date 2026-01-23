@@ -5,7 +5,7 @@ import time
 import math
 from datetime import datetime, timedelta
 
-# --- 📍 全台 368 鄉鎮市區經緯度資料庫 (已校準至各鄉鎮人口密集區/鄉公所) ---
+# --- 📍 全台 368 鄉鎮市區經緯度資料庫 ---
 TOWN_GEO = {
     "基隆市仁愛區": [25.1276, 121.7392], "基隆市信義區": [25.1294, 121.7495], "基隆市中正區": [25.1408, 121.7588], "基隆市中山區": [25.1444, 121.7303], "基隆市安樂區": [25.1232, 121.7169], "基隆市暖暖區": [25.0998, 121.7335], "基隆市七堵區": [25.0958, 121.7126],
     "臺北市中正區": [25.0321, 121.5195], "臺北市大同區": [25.0645, 121.5133], "臺北市中山區": [25.0685, 121.5332], "臺北市松山區": [25.0583, 121.5586], "臺北市大安區": [25.0263, 121.5438], "臺北市萬華區": [25.0313, 121.4988], "臺北市信義區": [25.0326, 121.5647], "臺北市士林區": [25.1166, 121.5478], "臺北市北投區": [25.1320, 121.4987], "臺北市內湖區": [25.0836, 121.5944], "臺北市南港區": [25.0381, 121.6074], "臺北市文山區": [24.9937, 121.5705],
@@ -136,9 +136,8 @@ def fetch_data():
     except:
         print("⚠️ AQI 失敗 (使用預設值)")
 
-    # 建立有效觀測站清單
+    # --- 重點修改 1：保存測站的「官方所屬縣市與鄉鎮」以便做同名比對 ---
     valid_stations_list = []    
-
     try:
         url_obs = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0003-001?Authorization={cwa_key}&format=JSON"
         res_obs = requests.get(url_obs).json()
@@ -154,6 +153,8 @@ def fetch_data():
                 continue 
 
             geo = st['GeoInfo']
+            county_name = geo['CountyName']
+            town_name = geo['TownName']
             lat = float(geo['Coordinates'][0]['StationLatitude'])
             lon = float(geo['Coordinates'][0]['StationLongitude'])
             station_name = st['StationName']
@@ -169,12 +170,14 @@ def fetch_data():
                     if wind < 0: wind = 0
                     if rain < 0: rain = 0
                     
-                    station_data = {
+                    # 將所屬縣市、鄉鎮一起存起來
+                    valid_stations_list.append({
                         "name": station_name,
+                        "county": county_name,
+                        "town": town_name,
                         "lat": lat, "lon": lon,
                         "data": {"temp": temp, "humidity": humid, "wind_speed": wind, "rain": rain}
-                    }
-                    valid_stations_list.append(station_data)
+                    })
                     count += 1
             except: continue
         print(f"✅ 有效且新鮮測站: {count} 個")
@@ -192,7 +195,7 @@ def fetch_data():
         "金門縣": "F-D0047-085"
     }
 
-    print("📡 開始精準配對 (誤差1度以內之挑戰)...")
+    print("📡 開始三層防線配對 (同名 > 5公里 > 預報平均)...")
     
     for city_name, api_id in county_api_week.items():
         try:
@@ -211,57 +214,54 @@ def fetch_data():
                 weather_elements = loc.get('weatherElement', loc.get('WeatherElement', []))
                 town_key = f"{city_name}{town_name}"
 
-                # ---------------------------------------------------------
-                # 🎯 核心防線：地理配對演算法 (解決秀林鄉等大山區問題)
-                # ---------------------------------------------------------
                 final_obs_data = None
                 source_station_name = ""
+
+                # --- 🔍 第一道防線：同名鄉鎮匹配 (Tier 1) ---
+                for st in valid_stations_list:
+                    if st['county'] == city_name and st['town'] == town_name:
+                        final_obs_data = st['data']
+                        source_station_name = st['name'] + " (本鄉鎮測站)"
+                        break # 找到同名測站就立刻停止
                 
-                # 第一道防線：只找鄉公所/人口密集區半徑「5公里內」的測站
-                if TOWN_GEO.get(town_key):
+                # --- 🔍 第二道防線：5 公里內的微距測站 (Tier 2) ---
+                if not final_obs_data and TOWN_GEO.get(town_key):
                     town_lat, town_lon = TOWN_GEO.get(town_key)
-                    matched_station = None
                     min_dist = 99999.0
-                    
+                    best_st = None
                     for st in valid_stations_list:
                         dist = calculate_distance(town_lat, town_lon, st['lat'], st['lon'])
                         if dist < min_dist:
                             min_dist = dist
-                            matched_station = st
+                            best_st = st
                     
-                    # 🔴 距離鎖死在 5 公里！絕對不抓山上或隔壁鄉鎮的
-                    if matched_station and min_dist <= 5.0:
-                        final_obs_data = matched_station['data']
-                        source_station_name = matched_station['name']
+                    if best_st and min_dist <= 5.0:
+                        final_obs_data = best_st['data']
+                        source_station_name = best_st['name'] + f" ({round(min_dist, 1)}km)"
 
-                # 第二道防線：如果 5 公里內沒測站 (如秀林)，直接抓氣象署「當下這小時」的預報
+                # --- 🔍 第三道防線：未來一小時預報高低溫平均 (Tier 3) ---
+                # 這裡需要解析所有的預報資料
                 forecast_wx = "多雲"
-                forecast_temp_now = "25" # 預設，等等會被正確預報覆蓋
                 daily_agg = {}
+                min_t_now = 0
+                max_t_now = 0
 
-                # 解析預報資料
                 for el in weather_elements:
                     e_name = el.get('elementName', el.get('ElementName'))
                     time_list = el.get('time', el.get('Time', []))
                     
-                    # 抓現在的天氣現象
-                    if e_name == 'Wx' and time_list:
-                         vals = time_list[0].get('elementValue', time_list[0].get('ElementValue', []))
+                    if not time_list: continue
+
+                    # 抓取第一筆 (即未來一小時) 的最高/最低溫
+                    if e_name == 'MinT':
+                        try: min_t_now = int(time_list[0].get('elementValue', [])[0].get('value'))
+                        except: pass
+                    elif e_name == 'MaxT':
+                        try: max_t_now = int(time_list[0].get('elementValue', [])[0].get('value'))
+                        except: pass
+                    elif e_name == 'Wx':
+                         vals = time_list[0].get('elementValue', [])
                          if vals: forecast_wx = vals[0].get('value', '多雲')
-                    
-                    # 🎯 抓取「時間最接近現在」的預報溫度
-                    if e_name == 'T' and time_list:
-                        min_time_diff = float('inf')
-                        for t in time_list:
-                            start_time_str = t.get('startTime', t.get('StartTime', ''))
-                            if len(start_time_str) >= 19:
-                                st_time = datetime.strptime(start_time_str[:19], "%Y-%m-%d %H:%M:%S")
-                                diff = abs((tw_now - st_time).total_seconds())
-                                # 找出最接近現在的那個 3 小時預報區間
-                                if diff < min_time_diff:
-                                    min_time_diff = diff
-                                    val = t.get('elementValue', t.get('ElementValue', []))[0].get('value', '25')
-                                    forecast_temp_now = val
 
                     # 收集一週預報 (維持不變)
                     for t in time_list:
@@ -302,21 +302,26 @@ def fetch_data():
                             "prob": f"{pop_prob}%"
                         })
                 
-                # --- 最終判定 ---
-                # 如果 5 公里內有測站，用實測；如果沒有，用氣象署當下預報
+                # --- 結算最終結果 ---
                 if final_obs_data:
                     final_temp = final_obs_data['temp']
                     final_rain = final_obs_data['rain']
                     final_ws = final_obs_data['wind_speed']
                     final_wx = "雨天" if final_rain > 0 else forecast_wx 
                 else:
-                    # 🔴 啟用官方預報 (如秀林鄉的10度)
-                    final_temp = int(forecast_temp_now)
+                    # 🔴 啟用第三道防線：(最高溫 + 最低溫) / 2
+                    if min_t_now != 0 and max_t_now != 0:
+                        final_temp = round((min_t_now + max_t_now) / 2)
+                    elif daily_forecast:
+                        final_temp = round((daily_forecast[0]['high'] + daily_forecast[0]['low']) / 2)
+                    else:
+                        final_temp = 20 # 極端情況防呆
+                        
                     final_rain = 0
                     final_ws = 2
                     final_wx = forecast_wx
                     final_obs_data = {"temp": final_temp, "humidity": 75, "wind_speed": 2, "rain": 0}
-                    source_station_name = "氣象局即時預報"
+                    source_station_name = "氣象署即時預報平均"
 
                 indices = calculate_lifestyle_indices(weather_elements, final_obs_data)
                 my_aqi = aqi_map.get(city_name, 35)
@@ -351,7 +356,7 @@ def fetch_data():
         except Exception as e:
             print(f"❌ {city_name} 錯誤: {e}")
 
-    print("🎉 資料庫更新完畢！(高山平地誤差已修正，精準對齊官方)")
+    print("🎉 資料庫更新完畢！")
 
 if __name__ == "__main__":
     fetch_data()
