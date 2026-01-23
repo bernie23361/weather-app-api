@@ -3,9 +3,9 @@ import json
 import os
 import time
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# --- 📍 全台 368 鄉鎮市區經緯度資料庫 (人工校正版) ---
+# --- 📍 全台 368 鄉鎮市區經緯度資料庫 ---
 TOWN_GEO = {
     "基隆市仁愛區": [25.1276, 121.7392], "基隆市信義區": [25.1294, 121.7495], "基隆市中正區": [25.1408, 121.7588], "基隆市中山區": [25.1444, 121.7303], "基隆市安樂區": [25.1232, 121.7169], "基隆市暖暖區": [25.0998, 121.7335], "基隆市七堵區": [25.0958, 121.7126],
     "臺北市中正區": [25.0321, 121.5195], "臺北市大同區": [25.0645, 121.5133], "臺北市中山區": [25.0685, 121.5332], "臺北市松山區": [25.0583, 121.5586], "臺北市大安區": [25.0263, 121.5438], "臺北市萬華區": [25.0313, 121.4988], "臺北市信義區": [25.0326, 121.5647], "臺北市士林區": [25.1166, 121.5478], "臺北市北投區": [25.1320, 121.4987], "臺北市內湖區": [25.0836, 121.5944], "臺北市南港區": [25.0381, 121.6074], "臺北市文山區": [24.9937, 121.5705],
@@ -210,46 +210,78 @@ def fetch_data():
                     final_obs_data = None
                     source_station_name = "預報推算(無座標)"
 
-                # 解析預報 (備案 & 未來)
-                forecast_temp = "25"
+                # --- 修正後的預報解析邏輯 (Min/Max & PoP) ---
+                # 用 dict 收集同一天的所有數據： temps, pops, wx
                 forecast_wx = "多雲"
-                daily_forecast = []
-                processed_dates = set()
+                daily_agg = {} # "2026-01-23": { "temps": [], "pops": [], "wx": [] }
 
                 for el in weather_elements:
                     e_name = el.get('elementName', el.get('ElementName'))
                     time_list = el.get('time', el.get('Time', []))
                     
-                    if e_name == 'T' and time_list:
-                        vals = time_list[0].get('elementValue', time_list[0].get('ElementValue', []))
-                        if vals: forecast_temp = vals[0].get('value', '25')
-                    
+                    # 抓現在的天氣現象
                     if e_name == 'Wx' and time_list:
-                        vals = time_list[0].get('elementValue', time_list[0].get('ElementValue', []))
-                        if vals: forecast_wx = vals[0].get('value', '多雲')
+                         vals = time_list[0].get('elementValue', time_list[0].get('ElementValue', []))
+                         if vals: forecast_wx = vals[0].get('value', '多雲')
 
-                    if e_name == 'T' and time_list:
-                        for t in time_list:
-                            start_time = t.get('startTime', t.get('StartTime', ''))
-                            vals = t.get('elementValue', t.get('ElementValue', []))
-                            if not vals: continue
-                            val = vals[0].get('value', '0')
+                    # 收集數據
+                    for t in time_list:
+                        start_time = t.get('startTime', t.get('StartTime', ''))
+                        vals = t.get('elementValue', t.get('ElementValue', []))
+                        if not vals: continue
+                        val_str = vals[0].get('value', '0')
 
-                            if len(start_time) >= 10:
-                                dt = datetime.strptime(start_time[:10], "%Y-%m-%d")
-                                date_str = dt.strftime("%m/%d")
-                                if "06:00" in start_time or "12:00" in start_time:
-                                    if date_str not in processed_dates:
-                                        daily_forecast.append({"day": date_str, "temp": val, "condition": "多雲"})
-                                        processed_dates.add(date_str)
+                        # 解析日期 (只取前10碼 YYYY-MM-DD)
+                        if len(start_time) >= 10:
+                            date_str = start_time[:10] # 2026-01-23
+                            
+                            if date_str not in daily_agg:
+                                daily_agg[date_str] = { "temps": [], "pops": [], "wx": [] }
+                            
+                            if e_name == 'T':
+                                try: daily_agg[date_str]["temps"].append(int(val_str))
+                                except: pass
+                            elif e_name == 'PoP12h':
+                                try: daily_agg[date_str]["pops"].append(int(val_str))
+                                except: pass
+                            elif e_name == 'Wx':
+                                daily_agg[date_str]["wx"].append(val_str)
 
+                # 產生每日預報 (計算 High/Low/MaxPoP)
+                daily_forecast = []
+                sorted_dates = sorted(daily_agg.keys())
+                
+                for date in sorted_dates:
+                    data = daily_agg[date]
+                    if data["temps"]: # 只要有溫度就產生
+                        # 格式化日期為 MM/DD
+                        day_display = date[5:].replace('-', '/')
+                        
+                        # 找出當天出現最多次的天氣現象 (Mode)，若無則取第一個
+                        wx_condition = max(set(data["wx"]), key=data["wx"].count) if data["wx"] else "多雲"
+                        
+                        # 找出最大降雨機率
+                        pop_prob = max(data["pops"]) if data["pops"] else 0
+
+                        daily_forecast.append({
+                            "day": day_display,
+                            "high": max(data["temps"]),
+                            "low": min(data["temps"]),
+                            "condition": wx_condition,
+                            "prob": f"{pop_prob}%" # 加入降雨機率
+                        })
+                
                 # 最終數據整合
                 if final_obs_data:
                     final_temp = final_obs_data['temp']
                     final_rain = final_obs_data['rain']
                     final_wx = "雨天" if final_rain > 0 else forecast_wx 
                 else:
-                    final_temp = int(forecast_temp)
+                    # 如果沒觀測，用今天預報的平均值
+                    if daily_forecast:
+                        final_temp = (daily_forecast[0]['high'] + daily_forecast[0]['low']) / 2
+                    else:
+                        final_temp = 25
                     final_rain = 0
                     final_wx = forecast_wx
                     final_obs_data = {"temp": final_temp, "humidity": 75, "wind_speed": 2, "rain": 0}
@@ -265,9 +297,9 @@ def fetch_data():
                     "apparent_temp": str(int(final_temp - 2)),
                     "weather": final_wx,
                     "aqi": my_aqi,
-                    "station_source": source_station_name, # 這裡現在會顯示正確的測站名了！
+                    "station_source": source_station_name, 
                     "suggestions": indices,
-                    "daily_forecast": daily_forecast[:7],
+                    "daily_forecast": daily_forecast[:7], # 取未來 7 天
                     "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
 
