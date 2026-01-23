@@ -5,7 +5,6 @@ import time
 from datetime import datetime, timedelta
 
 def get_taiwanese_quote(apparent_temp, weather, is_raining, wind_speed, is_broken=False):
-    # 如果測站故障，直接回傳故障訊息
     if is_broken:
         return "⚠️ 該鄉鎮目前無測站訊號或儀器維護中。"
 
@@ -30,7 +29,6 @@ def get_taiwanese_quote(apparent_temp, weather, is_raining, wind_speed, is_broke
     return advice
 
 def calculate_lifestyle_indices(weather_elements, current_vals, is_broken=False):
-    # 如果測站故障，生活指數無法計算，回傳預設空值
     if is_broken:
         return {
             "clothing": "--", "cycling": "--", "sunscreen": "--",
@@ -113,16 +111,14 @@ def fetch_data():
         print("⚠️ AQI 失敗 (使用預設值)")
 
     # ----------------------------------------------------
-    # 🎯 絕對精準：建立 O-A0003-001 鄉鎮唯一測站地圖
+    # 🎯 雙重 API 覆蓋：O-A0003-001 (局屬站) + O-A0001-001 (自動站)
     # ----------------------------------------------------
     valid_stations_by_town = {}    
-    try:
-        url_obs = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0003-001?Authorization={cwa_key}&format=JSON"
-        res_obs = requests.get(url_obs).json()
-        stations = res_obs['records']['Station']
-        
+    
+    # 解析測站資料的共用函數
+    def process_stations(stations_data, is_primary):
         count = 0
-        for st in stations:
+        for st in stations_data:
             obs_time_str = st['ObsTime']['DateTime']
             obs_time = datetime.strptime(obs_time_str[:19], "%Y-%m-%dT%H:%M:%S")
             
@@ -134,6 +130,10 @@ def fetch_data():
             county_name = geo['CountyName']
             town_name = geo['TownName']
             full_town_key = f"{county_name}{town_name}" # 例如：花蓮縣秀林鄉
+
+            # 策略：如果是自動站(非主要)，且該鄉鎮已經有局屬站(主要)了，就跳過不覆蓋
+            if not is_primary and full_town_key in valid_stations_by_town:
+                continue
 
             station_name = st['StationName']
             weather = st['WeatherElement']
@@ -149,16 +149,34 @@ def fetch_data():
                     if wind < 0: wind = 0
                     if rain < 0: rain = 0
                     
-                    # 以「縣市+鄉鎮」作為 Key，只存最新的有效資料
+                    # 存入字典
                     valid_stations_by_town[full_town_key] = {
                         "name": station_name,
                         "data": {"temp": temp, "humidity": humid, "wind_speed": wind, "rain": rain}
                     }
                     count += 1
             except: continue
-        print(f"✅ 有效運作中測站: {count} 個")
+        return count
+
+    # 第一波：抓取 O-A0003-001 (高品質局屬測站)
+    try:
+        url_obs_3 = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0003-001?Authorization={cwa_key}&format=JSON"
+        res_obs_3 = requests.get(url_obs_3).json()
+        count_3 = process_stations(res_obs_3['records']['Station'], is_primary=True)
+        print(f"✅ 局屬測站 (O-A0003-001) 載入: {count_3} 個鄉鎮已覆蓋")
     except Exception as e:
-        print(f"❌ 觀測資料庫建立失敗: {e}")
+        print(f"⚠️ O-A0003-001 抓取失敗: {e}")
+
+    # 第二波：抓取 O-A0001-001 (高密度自動測站)，填補剩下的鄉鎮空缺
+    try:
+        url_obs_1 = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0001-001?Authorization={cwa_key}&format=JSON"
+        res_obs_1 = requests.get(url_obs_1).json()
+        count_1 = process_stations(res_obs_1['records']['Station'], is_primary=False)
+        print(f"✅ 自動測站 (O-A0001-001) 填補: 新增 {count_1} 個鄉鎮覆蓋")
+    except Exception as e:
+        print(f"⚠️ O-A0001-001 抓取失敗: {e}")
+
+    print(f"📊 總計成功覆蓋鄉鎮數: {len(valid_stations_by_town)} 個")
 
     county_api_week = {
         "宜蘭縣": "F-D0047-003", "桃園市": "F-D0047-007", "新竹縣": "F-D0047-009",
@@ -171,7 +189,7 @@ def fetch_data():
         "金門縣": "F-D0047-085"
     }
 
-    print("📡 開始一對一嚴格配對...")
+    print("📡 開始一對一嚴格配對 (無測站絕不猜測)...")
     
     for city_name, api_id in county_api_week.items():
         try:
@@ -191,13 +209,12 @@ def fetch_data():
                 town_key = f"{city_name}{town_name}"
 
                 # ---------------------------------------------------------
-                # 🛑 新邏輯：是就是，不是就不是。絕不猜測。
+                # 🛑 絕對匹配：該鄉鎮有雙重 API 任一個正常運作的測站嗎？
                 # ---------------------------------------------------------
                 final_obs_data = None
-                source_station_name = "測站故障 / 無測站"
+                source_station_name = "測站故障 / 該鄉鎮無測站"
                 is_station_broken = True
 
-                # 唯一檢查點：該鄉鎮是否有回傳正常的觀測資料？
                 if town_key in valid_stations_by_town:
                     final_obs_data = valid_stations_by_town[town_key]['data']
                     source_station_name = valid_stations_by_town[town_key]['name']
@@ -255,14 +272,12 @@ def fetch_data():
                 
                 # --- 最終判定 ---
                 if is_station_broken:
-                    # 🔴 測站故障或不存在：顯示無資料
                     final_temp = "--"
                     apparent_temp_str = "--"
                     final_wx = forecast_wx # 圖示仍參考預報
                     final_rain = 0
                     final_ws = 0
                 else:
-                    # ✅ 正常顯示該鄉鎮資料
                     final_temp = str(int(final_obs_data['temp']))
                     final_rain = final_obs_data['rain']
                     final_ws = final_obs_data['wind_speed']
@@ -274,7 +289,6 @@ def fetch_data():
                 if not is_station_broken:
                     apparent_temp_str = str(indices['apparent_temp'])
 
-                # 產生精準語錄或故障警示
                 pure_advice = get_taiwanese_quote(
                     apparent_temp=indices.get('apparent_temp', 0) if not is_station_broken else 0, 
                     weather=final_wx, 
@@ -286,8 +300,8 @@ def fetch_data():
                 processed_data = {
                     "city": city_name,
                     "district": town_name,
-                    "temp": final_temp, # "--" 或 數字字串
-                    "apparent_temp": apparent_temp_str, # "--" 或 數字字串
+                    "temp": final_temp, # "--" 或 數字
+                    "apparent_temp": apparent_temp_str, # "--" 或 數字
                     "weather": final_wx,
                     "aqi": my_aqi,
                     "station_source": source_station_name, 
@@ -306,7 +320,7 @@ def fetch_data():
         except Exception as e:
             print(f"❌ {city_name} 錯誤: {e}")
 
-    print("🎉 資料庫更新完畢！(純 O-A0003-001 絕對精準版)")
+    print("🎉 資料庫更新完畢！(雙重 API 護航完成)")
 
 if __name__ == "__main__":
     fetch_data()
