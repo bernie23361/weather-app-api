@@ -3,7 +3,6 @@ import json
 import os
 import time
 import math
-import random
 from datetime import datetime, timedelta
 
 # --- 📍 全台 368 鄉鎮市區經緯度資料庫 ---
@@ -42,15 +41,12 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c 
 
-# --- 🎤 新功能：台式氣象語錄生成器 (Professional + Caring + Taiwanese) ---
-def get_taiwanese_quote(temp, apparent_temp, weather, is_raining, wind_speed):
-    # 第一段：精準數據
-    base_info = f"體感 {apparent_temp}°，{weather}。"
+# --- 🎤 升級版：純粹・台式氣象語錄生成器 (僅保留行動建議) ---
+def get_taiwanese_quote(apparent_temp, weather, is_raining, wind_speed):
+    # 這裡不再包含「體感幾度」這種重複數據，只說人話
+    advice = "天氣剛剛好，出門走走吧！" # 預設語錄
     
-    # 第二段：情境判斷與台式提醒
-    advice = ""
-    
-    # 狀況 1：下雨天 (最優先)
+    # 狀況 1：下雨天 (最優先警示)
     if is_raining:
         if "大雨" in weather or "豪雨" in weather:
             advice = "外面落大雨，雨具要傳賀 (準備好)，騎車卡注意安全喔！"
@@ -73,7 +69,8 @@ def get_taiwanese_quote(temp, apparent_temp, weather, is_raining, wind_speed):
     else: # > 32度
         advice = "日頭赤炎炎，超級熱！防曬做好小心中暑，盡量待在冷氣房！"
 
-    return f"{base_info}{advice}"
+    # 👇 關鍵修正：現在只回傳純語錄，沒有數字干擾
+    return advice
 
 def calculate_lifestyle_indices(weather_elements, current_vals):
     curr_t = current_vals.get('temp', 25)
@@ -122,7 +119,7 @@ def calculate_lifestyle_indices(weather_elements, current_vals):
         "clothing": clothing, "cycling": cycling, "sunscreen": sunscreen,
         "laundry": laundry, "car_wash": car_wash, "skincare": skincare,
         "cold_risk": cold_risk, "dog_walk": dog_walk, "sport": sport,
-        "apparent_temp": curr_at # 回傳計算好的體感溫度
+        "apparent_temp": curr_at 
     }
 
 def fetch_data():
@@ -135,7 +132,7 @@ def fetch_data():
     tw_now = datetime.utcnow() + timedelta(hours=8)
     tw_now_str = tw_now.strftime("%Y-%m-%d %H:%M:%S")
 
-    print(f"🚀 啟動氣象站: 台灣時間 {tw_now_str} (已校正時區)")
+    print(f"🚀 啟動氣象站: 台灣時間 {tw_now_str}")
 
     # 1. AQI
     aqi_map = {}
@@ -313,9 +310,8 @@ def fetch_data():
                 indices = calculate_lifestyle_indices(weather_elements, final_obs_data)
                 my_aqi = aqi_map.get(city_name, 35)
 
-                # --- 🤖 產生動態語錄小提醒 ---
-                smart_description = get_taiwanese_quote(
-                    temp=final_temp, 
+                # --- 🤖 修改後的純語錄產生器 ---
+                pure_advice = get_taiwanese_quote(
                     apparent_temp=indices['apparent_temp'], 
                     weather=final_wx, 
                     is_raining=(final_rain > 0 or "雨" in final_wx),
@@ -330,7 +326,7 @@ def fetch_data():
                     "weather": final_wx,
                     "aqi": my_aqi,
                     "station_source": source_station_name, 
-                    "description": smart_description, # 傳送給 APP 顯示
+                    "description": pure_advice, # 現在這裡只有純粹的台式關心！
                     "suggestions": indices,
                     "daily_forecast": daily_forecast[:7],
                     "update_time": tw_now_str 
