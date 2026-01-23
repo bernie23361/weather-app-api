@@ -42,14 +42,13 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c # 回傳距離 (km)
 
-# --- 🧠 生活指數計算 (含大小寫修復) ---
+# --- 🧠 生活指數計算 ---
 def calculate_lifestyle_indices(weather_elements, current_vals):
     curr_t = current_vals.get('temp', 25)
     curr_rh = current_vals.get('humidity', 75)
     curr_ws = current_vals.get('wind_speed', 2)
     curr_rain = current_vals.get('rain', 0)
     
-    # 預報趨勢
     pop_12h = 0
     for item in weather_elements:
         e_name = item.get('elementName', item.get('ElementName'))
@@ -98,7 +97,12 @@ def fetch_data():
     if not os.path.exists("data"):
         os.makedirs("data")
 
-    print("🚀 啟動氣象站：使用內建座標庫 + 距離演算法...")
+    # 🇹🇼 設定「台灣標準時間」(UTC+8) 作為系統基準時間
+    # GitHub Action 伺服器在 UTC (美國)，所以要手動加 8 小時
+    tw_now = datetime.utcnow() + timedelta(hours=8)
+    tw_now_str = tw_now.strftime("%Y-%m-%d %H:%M:%S")
+
+    print(f"🚀 啟動氣象站: 台灣時間 {tw_now_str} (已校正時區)")
 
     # 1. AQI
     aqi_map = {}
@@ -114,7 +118,7 @@ def fetch_data():
     except:
         print("⚠️ AQI 失敗 (使用預設值)")
 
-    # 2. 真實觀測站
+    # 2. 真實觀測站 (加入「時間賞味期限」過濾，剔除殭屍測站)
     valid_stations = []
     try:
         url_obs = f"https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0003-001?Authorization={cwa_key}&format=JSON"
@@ -123,6 +127,17 @@ def fetch_data():
         
         count = 0
         for st in stations:
+            # ⏳ 取得氣象署該筆資料的時間
+            obs_time_str = st['ObsTime']['DateTime'] # 例: 2026-01-23T12:00:00+08:00
+            
+            # 將氣象署的時間字串轉換為 Python datetime (忽略時區字串，只取前 19 碼)
+            obs_time = datetime.strptime(obs_time_str[:19], "%Y-%m-%dT%H:%M:%S")
+            
+            # 🛑 核心防線：資料賞味期限為「1.5 小時 (5400秒)」
+            # 拿【台灣現在時間 (tw_now)】去減【測站回傳時間 (obs_time)】
+            if (tw_now - obs_time).total_seconds() > 5400:
+                continue # 這筆資料太舊了，直接跳過這個測站！
+
             geo = st['GeoInfo']
             lat = float(geo['Coordinates'][0]['StationLatitude'])
             lon = float(geo['Coordinates'][0]['StationLongitude'])
@@ -145,11 +160,11 @@ def fetch_data():
                     })
                     count += 1
             except: continue
-        print(f"✅ 有效測站: {count} 個")
+        print(f"✅ 有效且新鮮測站: {count} 個 (已剔除過期殭屍測站)")
     except Exception as e:
         print(f"❌ 觀測失敗: {e}")
 
-    # 3. 處理 368 鄉鎮 (使用內建座標，不再依賴 API 座標)
+    # 3. 處理 368 鄉鎮
     county_api_week = {
         "宜蘭縣": "F-D0047-003", "桃園市": "F-D0047-007", "新竹縣": "F-D0047-009",
         "苗栗縣": "F-D0047-013", "彰化縣": "F-D0047-017", "南投縣": "F-D0047-021",
@@ -179,17 +194,12 @@ def fetch_data():
                 town_name = loc.get('locationName', loc.get('LocationName', '未知'))
                 weather_elements = loc.get('weatherElement', loc.get('WeatherElement', []))
                 
-                # 📍 關鍵修改 1：使用 city_name + town_name 來產生唯一檔名
-                # 這會產生 "臺中市北區.json" 和 "臺南市北區.json"
-                
                 town_key = f"{city_name}{town_name}"
                 geo_info = TOWN_GEO.get(town_key)
                 
-                # 只有當我們知道這個鄉鎮在哪裡，才能算距離
                 if geo_info:
                     town_lat, town_lon = geo_info
                     
-                    # 尋找最近測站
                     matched_station = None
                     min_dist = 99999.0
                     for st in valid_stations:
@@ -201,39 +211,33 @@ def fetch_data():
                     final_obs_data = None
                     source_station_name = ""
 
-                    # 距離 < 15km 採用
                     if matched_station and min_dist < 15:
                         final_obs_data = matched_station['data']
                         source_station_name = matched_station['name']
                 else:
-                    # 資料庫沒這個鄉鎮 (罕見)，只能用預報
                     final_obs_data = None
                     source_station_name = "預報推算(無座標)"
 
-                # --- 修正後的預報解析邏輯 (Min/Max & PoP) ---
-                # 用 dict 收集同一天的所有數據： temps, pops, wx
+                # --- 預報解析 ---
                 forecast_wx = "多雲"
-                daily_agg = {} # "2026-01-23": { "temps": [], "pops": [], "wx": [] }
+                daily_agg = {}
 
                 for el in weather_elements:
                     e_name = el.get('elementName', el.get('ElementName'))
                     time_list = el.get('time', el.get('Time', []))
                     
-                    # 抓現在的天氣現象
                     if e_name == 'Wx' and time_list:
                          vals = time_list[0].get('elementValue', time_list[0].get('ElementValue', []))
                          if vals: forecast_wx = vals[0].get('value', '多雲')
 
-                    # 收集數據
                     for t in time_list:
                         start_time = t.get('startTime', t.get('StartTime', ''))
                         vals = t.get('elementValue', t.get('ElementValue', []))
                         if not vals: continue
                         val_str = vals[0].get('value', '0')
 
-                        # 解析日期 (只取前10碼 YYYY-MM-DD)
                         if len(start_time) >= 10:
-                            date_str = start_time[:10] # 2026-01-23
+                            date_str = start_time[:10] 
                             
                             if date_str not in daily_agg:
                                 daily_agg[date_str] = { "temps": [], "pops": [], "wx": [] }
@@ -247,20 +251,14 @@ def fetch_data():
                             elif e_name == 'Wx':
                                 daily_agg[date_str]["wx"].append(val_str)
 
-                # 產生每日預報 (計算 High/Low/MaxPoP)
                 daily_forecast = []
                 sorted_dates = sorted(daily_agg.keys())
                 
                 for date in sorted_dates:
                     data = daily_agg[date]
-                    if data["temps"]: # 只要有溫度就產生
-                        # 格式化日期為 MM/DD
+                    if data["temps"]:
                         day_display = date[5:].replace('-', '/')
-                        
-                        # 找出當天出現最多次的天氣現象 (Mode)，若無則取第一個
                         wx_condition = max(set(data["wx"]), key=data["wx"].count) if data["wx"] else "多雲"
-                        
-                        # 找出最大降雨機率
                         pop_prob = max(data["pops"]) if data["pops"] else 0
 
                         daily_forecast.append({
@@ -268,7 +266,7 @@ def fetch_data():
                             "high": max(data["temps"]),
                             "low": min(data["temps"]),
                             "condition": wx_condition,
-                            "prob": f"{pop_prob}%" # 加入降雨機率
+                            "prob": f"{pop_prob}%"
                         })
                 
                 # 最終數據整合
@@ -277,7 +275,6 @@ def fetch_data():
                     final_rain = final_obs_data['rain']
                     final_wx = "雨天" if final_rain > 0 else forecast_wx 
                 else:
-                    # 如果沒觀測，用今天預報的平均值
                     if daily_forecast:
                         final_temp = (daily_forecast[0]['high'] + daily_forecast[0]['low']) / 2
                     else:
@@ -299,11 +296,10 @@ def fetch_data():
                     "aqi": my_aqi,
                     "station_source": source_station_name, 
                     "suggestions": indices,
-                    "daily_forecast": daily_forecast[:7], # 取未來 7 天
-                    "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    "daily_forecast": daily_forecast[:7],
+                    "update_time": tw_now_str # 這裡現在會顯示正確的台灣時間了！
                 }
 
-                # 📍 關鍵修改 2：存檔檔名加入縣市名稱
                 file_path = f"data/{city_name}{town_name}.json"
                 with open(file_path, "w", encoding="utf-8") as f:
                     json.dump(processed_data, f, ensure_ascii=False)
@@ -313,7 +309,7 @@ def fetch_data():
         except Exception as e:
             print(f"❌ {city_name} 錯誤: {e}")
 
-    print("🎉 資料庫修正完畢！")
+    print("🎉 資料庫更新完畢！(殭屍測站已清除，時間已校正)")
 
 if __name__ == "__main__":
     fetch_data()
