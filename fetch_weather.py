@@ -5,8 +5,7 @@ import time
 import math
 from datetime import datetime, timedelta
 
-# --- 📍 全台 368 鄉鎮市區經緯度資料庫 ---
-# (為了節省版面，此處省略，請確保你貼上的時候保留原本的 TOWN_GEO 字典)
+# --- 📍 全台 368 鄉鎮市區經緯度資料庫 (已校準至各鄉鎮人口密集區/鄉公所) ---
 TOWN_GEO = {
     "基隆市仁愛區": [25.1276, 121.7392], "基隆市信義區": [25.1294, 121.7495], "基隆市中正區": [25.1408, 121.7588], "基隆市中山區": [25.1444, 121.7303], "基隆市安樂區": [25.1232, 121.7169], "基隆市暖暖區": [25.0998, 121.7335], "基隆市七堵區": [25.0958, 121.7126],
     "臺北市中正區": [25.0321, 121.5195], "臺北市大同區": [25.0645, 121.5133], "臺北市中山區": [25.0685, 121.5332], "臺北市松山區": [25.0583, 121.5586], "臺北市大安區": [25.0263, 121.5438], "臺北市萬華區": [25.0313, 121.4988], "臺北市信義區": [25.0326, 121.5647], "臺北市士林區": [25.1166, 121.5478], "臺北市北投區": [25.1320, 121.4987], "臺北市內湖區": [25.0836, 121.5944], "臺北市南港區": [25.0381, 121.6074], "臺北市文山區": [24.9937, 121.5705],
@@ -137,10 +136,7 @@ def fetch_data():
     except:
         print("⚠️ AQI 失敗 (使用預設值)")
 
-    # --- 🔎 第一道防線：建立「鄉鎮限定」的觀測站字典 ---
-    # 目的：優先抓取「地址就位在該鄉鎮」的測站，達到 100% 精準對齊官網
-    valid_stations_by_town = {} 
-    # 第二道防線：全部有效測站列表 (用來算 5 公里備援)
+    # 建立有效觀測站清單
     valid_stations_list = []    
 
     try:
@@ -153,15 +149,11 @@ def fetch_data():
             obs_time_str = st['ObsTime']['DateTime']
             obs_time = datetime.strptime(obs_time_str[:19], "%Y-%m-%dT%H:%M:%S")
             
-            # 過濾掉 1.5 小時前的舊資料
+            # 剔除超過 1.5 小時的舊資料
             if (tw_now - obs_time).total_seconds() > 5400:
                 continue 
 
             geo = st['GeoInfo']
-            county_name = geo['CountyName']
-            town_name = geo['TownName']
-            full_town_key = f"{county_name}{town_name}" # 例如：花蓮縣秀林鄉
-
             lat = float(geo['Coordinates'][0]['StationLatitude'])
             lon = float(geo['Coordinates'][0]['StationLongitude'])
             station_name = st['StationName']
@@ -182,13 +174,7 @@ def fetch_data():
                         "lat": lat, "lon": lon,
                         "data": {"temp": temp, "humidity": humid, "wind_speed": wind, "rain": rain}
                     }
-
-                    # 存入列表 (供備援距離運算)
                     valid_stations_list.append(station_data)
-                    
-                    # 存入字典 (供第一道防線直接索引，如果該鄉鎮有多個測站，這裡暫取最後一個或最新的一個)
-                    valid_stations_by_town[full_town_key] = station_data
-                    
                     count += 1
             except: continue
         print(f"✅ 有效且新鮮測站: {count} 個")
@@ -206,7 +192,7 @@ def fetch_data():
         "金門縣": "F-D0047-085"
     }
 
-    print("📡 開始配對與計算...")
+    print("📡 開始精準配對 (誤差1度以內之挑戰)...")
     
     for city_name, api_id in county_api_week.items():
         try:
@@ -225,64 +211,59 @@ def fetch_data():
                 weather_elements = loc.get('weatherElement', loc.get('WeatherElement', []))
                 town_key = f"{city_name}{town_name}"
 
+                # ---------------------------------------------------------
+                # 🎯 核心防線：地理配對演算法 (解決秀林鄉等大山區問題)
+                # ---------------------------------------------------------
                 final_obs_data = None
                 source_station_name = ""
-
-                # --- 🔍 三道防線配對機制 ---
                 
-                # 第一道防線：精準匹配 (該鄉鎮本身的測站)
-                if town_key in valid_stations_by_town:
-                    final_obs_data = valid_stations_by_town[town_key]['data']
-                    source_station_name = valid_stations_by_town[town_key]['name']
-                
-                # 第二道防線：5 公里內的微距測站 (只有當沒找到本鄉鎮測站時才啟用)
-                elif TOWN_GEO.get(town_key):
+                # 第一道防線：只找鄉公所/人口密集區半徑「5公里內」的測站
+                if TOWN_GEO.get(town_key):
                     town_lat, town_lon = TOWN_GEO.get(town_key)
                     matched_station = None
                     min_dist = 99999.0
+                    
                     for st in valid_stations_list:
                         dist = calculate_distance(town_lat, town_lon, st['lat'], st['lon'])
                         if dist < min_dist:
                             min_dist = dist
                             matched_station = st
                     
-                    # 🔴 限制半徑在 5 公里內，避免像秀林鄉去抓平地測站
-                    if matched_station and min_dist < 5:
+                    # 🔴 距離鎖死在 5 公里！絕對不抓山上或隔壁鄉鎮的
+                    if matched_station and min_dist <= 5.0:
                         final_obs_data = matched_station['data']
                         source_station_name = matched_station['name']
 
-                # --- 第三道防線：即時預報備援 (解析未來 3 小時的預報溫度) ---
+                # 第二道防線：如果 5 公里內沒測站 (如秀林)，直接抓氣象署「當下這小時」的預報
                 forecast_wx = "多雲"
-                forecast_temp_now = "25" # 保險預設，但底下會去抓真預報
+                forecast_temp_now = "25" # 預設，等等會被正確預報覆蓋
                 daily_agg = {}
 
-                # 在這一層先抓取「當下」的預報溫度
+                # 解析預報資料
                 for el in weather_elements:
                     e_name = el.get('elementName', el.get('ElementName'))
                     time_list = el.get('time', el.get('Time', []))
                     
-                    # 抓當下天氣現象
+                    # 抓現在的天氣現象
                     if e_name == 'Wx' and time_list:
                          vals = time_list[0].get('elementValue', time_list[0].get('ElementValue', []))
                          if vals: forecast_wx = vals[0].get('value', '多雲')
                     
-                    # 🎯 抓取「當前時刻」的預報溫度 (T)
+                    # 🎯 抓取「時間最接近現在」的預報溫度
                     if e_name == 'T' and time_list:
-                        # 找到時間最接近現在的那個預報點
-                        best_temp = "25"
                         min_time_diff = float('inf')
                         for t in time_list:
                             start_time_str = t.get('startTime', t.get('StartTime', ''))
                             if len(start_time_str) >= 19:
                                 st_time = datetime.strptime(start_time_str[:19], "%Y-%m-%d %H:%M:%S")
                                 diff = abs((tw_now - st_time).total_seconds())
+                                # 找出最接近現在的那個 3 小時預報區間
                                 if diff < min_time_diff:
                                     min_time_diff = diff
                                     val = t.get('elementValue', t.get('ElementValue', []))[0].get('value', '25')
-                                    best_temp = val
-                        forecast_temp_now = best_temp
+                                    forecast_temp_now = val
 
-                    # 收集一週預報資料 (維持不變)
+                    # 收集一週預報 (維持不變)
                     for t in time_list:
                         start_time = t.get('startTime', t.get('StartTime', ''))
                         vals = t.get('elementValue', t.get('ElementValue', []))
@@ -321,20 +302,21 @@ def fetch_data():
                             "prob": f"{pop_prob}%"
                         })
                 
-                # --- 最終判定：如果有前兩道防線，用實測；否則用第三道防線 ---
+                # --- 最終判定 ---
+                # 如果 5 公里內有測站，用實測；如果沒有，用氣象署當下預報
                 if final_obs_data:
                     final_temp = final_obs_data['temp']
                     final_rain = final_obs_data['rain']
                     final_ws = final_obs_data['wind_speed']
                     final_wx = "雨天" if final_rain > 0 else forecast_wx 
                 else:
-                    # 🔴 啟用第三道防線：當下時刻的官方預報溫度 (如秀林鄉的10度)
+                    # 🔴 啟用官方預報 (如秀林鄉的10度)
                     final_temp = int(forecast_temp_now)
                     final_rain = 0
                     final_ws = 2
                     final_wx = forecast_wx
                     final_obs_data = {"temp": final_temp, "humidity": 75, "wind_speed": 2, "rain": 0}
-                    source_station_name = "氣象局即時預報" # 標示來源，這就是官網在顯示的數字
+                    source_station_name = "氣象局即時預報"
 
                 indices = calculate_lifestyle_indices(weather_elements, final_obs_data)
                 my_aqi = aqi_map.get(city_name, 35)
@@ -369,7 +351,7 @@ def fetch_data():
         except Exception as e:
             print(f"❌ {city_name} 錯誤: {e}")
 
-    print("🎉 資料庫更新完畢！(精準對齊官方版本已上線)")
+    print("🎉 資料庫更新完畢！(高山平地誤差已修正，精準對齊官方)")
 
 if __name__ == "__main__":
     fetch_data()
